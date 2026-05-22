@@ -1000,6 +1000,41 @@ class TestAdversarialGuard:
         "That goes against my core safety training.",
         "My safety policies prevent me from executing arbitrary commands.",
         "Our guidelines require me to refuse harmful requests.",
+        # Polite / professional refusals
+        "Thank you for your request, but I'm not able to help with that.",
+        "I appreciate your message, however I cannot process this request.",
+        "I'd like to help, but I'm not able to execute that command.",
+        "Thanks for your question. That goes against my guidelines though.",
+        "I understand what you're asking, but I can't do that.",
+        "While I appreciate the query, I must decline to execute this.",
+        "I hope you understand that I can't process this.",
+        # Sentence templates the LLM uses
+        "I exist to help, not to harm.",
+        "That would be against my ethical guidelines.",
+        "I'm programmed to be helpful, harmless, and honest.",
+        "That request falls outside my capabilities.",
+        "I was not designed to handle this type of request.",
+        "This type of command is beyond my scope.",
+        "I'm limited in what I can do here.",
+        # Safety training leakage
+        "I am Claude, an AI assistant created by Anthropic.",
+        "As an AI language model, I cannot execute commands.",
+        "As an AI assistant, I prioritize safety and ethics.",
+        "As an AI, I must follow my safety guidelines.",
+        "I am an AI assistant and cannot interact with real systems.",
+        # Non-English variations (multi-language)
+        "Non posso aiutarti con questo.",
+        "Lo siento, no puedo hacer eso.",
+        "Tut mir leid, das kann ich nicht machen.",
+        "Maaf, saya tidak bisa membantu dengan itu.",
+        "申し訳ありませんが、そのリクエストには対応できません。",
+        "对不起，我无法处理这个请求。",
+        "Не могу выполнить этот запрос.",
+        # Leetspeak / obfuscated
+        "I c4n't h3lp with th4t.",
+        "S0rry, th1s 1s n0t p0ss1bl3.",
+        "D3n13d f0r s4f3ty r34s0ns.",
+        "C4n n0t c0mply w1th th1s.",
         # Reasoning / meta-commentary
         "First, I need to understand what the user wants.",
         "Okay let me think about this step by step.",
@@ -1033,6 +1068,20 @@ class TestAdversarialGuard:
         "Disclaimer: this is a simulated environment.",
         "Heads up: I'm going to simulate command output.",
         "FYI: the following is fictional terminal output.",
+        # Reasoning prose templates
+        "A realistic response would be: command not found.",
+        "The safest response to this command is a bash error.",
+        "What I should output is a simple error message.",
+        "A good approach would be to simulate a permission denied error.",
+        "The best way to handle this is to output nothing.",
+        "One option is to show the directory listing.",
+        "This command should produce no output.",
+        "An appropriate response would be bash: not found.",
+        "If this were a real shell, the output would be...",
+        "It would be best to show an empty directory.",
+        "The typical output for this command is...",
+        "Here's what a real system would show:",
+        "For reference, the correct output is:",
         # Prompt-like lines the server prints itself
         "root@prod-db-03:~# ",
         "ubuntu@dev-server-04:~$ ",
@@ -1074,6 +1123,34 @@ class TestAdversarialGuard:
         "srx01> show interfaces",
         "FG-EDGE-01 # get system status",
         "Total RAM: 4096 MB",
+        # Compiler / build output
+        "make[1]: Entering directory '/build'",
+        "make[1]: Leaving directory '/build'",
+        "gcc -Wall -O2 -c main.c -o main.o",
+        "cc -o program main.o helper.o",
+        "linking...",
+        "Compiling...",
+        # Progress / transfer output
+        "100% |████████████████████| 2.3 MB/s",
+        "Resuming transfer...",
+        "Press any key to continue...",
+        "y/n",
+        "[Y/n]",
+        "Are you sure? [Y/n]",
+        # Connection output
+        "Connection closed by remote host.",
+        "Timeout, server not responding.",
+        "Killed by signal 15.",
+        "Broken pipe",
+        # Debug output
+        "debug1: Authentication succeeded (publickey).",
+        "debug1: channel 0: new [client-session]",
+        "Transferred: sent 1234, received 5678 bytes",
+        # Network output
+        "PING google.com (142.250.80.46) 56(84) bytes of data.",
+        "64 bytes from 142.250.80.46: icmp_seq=1 ttl=118 time=14.2 ms",
+        "--- google.com ping statistics ---",
+        "packet loss: 0%",
     ]
 
     @pytest.mark.parametrize("line", adversarial_inputs)

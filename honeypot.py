@@ -728,17 +728,18 @@ def _load_health_cache() -> bool:
 
 # ── Output guard (strip LLM reasoning from terminal output) ────────────────
 _PROMPT_PATTERN = re.compile(
-    r"(^[\w.-]+@[\w.-]+[:/#].*[#$>] ?$)|"
-    r"(^[\w.-]+@[\w.-]+> ?$)|"
-    r"(^[\w.-]+ ?[#>] ?$)"
+    r"(^[\w][\w.-]*@[\w][\w.-]*[:/#].*[#$>] ?$)|"
+    r"(^[\w][\w.-]*@[\w][\w.-]*> ?$)|"
+    r"(^[\w][\w.-]* ?[#>] ?$)"
 )
 _REASONING_PATTERNS = re.compile(
     r"^(# |## |\* |- |"
     r"['\u2019]m (really|concerned|sorry|glad|sure|not|just|going|unable|afraid)"
     r"|We (are|need|should|must|can|would|could|have|had|do|did|shall|may|might)"
     r"|I(( |['\u2019]))(am|'?ll|will|think|should|need|must|would|could|have|had|"
-    r"do|did|shall|may|might|m really|m concerned|m sorry|m not|m going|m unable|"
-    r"m afraid|cannot|can't|won't|apologize|detect|can see|don't think)"
+    r"do|did|shall|may|might|"
+    r"m (really|concerned|sorry|not|going|unable|afraid|programmed|limited|Claude|an AI)|"
+    r"cannot|can't|won't|apologize|detect|can see|don't think|refuse)"
     r"|You( |['\u2019])(are|deserve|matter|should|need|must|can|re asking|'re asking)"
     r"|Your (safety|wellbeing|life|feelings|health|session|activity)"
     r"|The (user|command|prompt|system|attacker|input|output|message|above|below|"
@@ -756,7 +757,7 @@ _REASONING_PATTERNS = re.compile(
     r"|First[,:]? (I|let|we)"
     r"|Okay[,:]? let |Ok[,:]? let"
     r"|Alright[,:]? |Actually[,:]? |After reviewing|Going to "
-    r"|Thinking about|Hold on[,:]? |Re-?evaluating"
+    r"|Thinking about|Hold on[,:]? |Re-?evaluating|For reference"
     r"|From the context|Given the |Based on the "
     r"|I'?ll (respond|produce|generate|output|simulate|make|need|try"
     r"|not|never)"
@@ -767,22 +768,35 @@ _REASONING_PATTERNS = re.compile(
     r"|Step \d+[:]? |Now (I|we|let)"
     r"|Sorry[,:]? "
     r"|Denied for |Not going to "
-    r"|Can't comply|Cannot comply|won't comply"
-    r"|That (goes|command|request|instruction|sounds|seems|would|could)"
+    r"|Can't comply|Cannot comply|won't comply|cannot process|cannot assist"
+    r"|That (goes|command|request|instruction|sounds|seems|would|could|type|kind|"
+    r"would be|is (beyond|outside|against))"
     r"|(prevent|require|refuse) me "
     r"|guidelines require|policies prevent|training prevents"
+    r"|Thank you|Thanks for|I appreciate|I'd like|I understand|I hope "
+    r"|While I |I (exist|was|am (programmed|limited|designed|not)|"
+    r"was not designed|must decline|refuse|hope)"
+    r"|This (type|kind|command|request|would|should|is not|goes|is (beyond|outside|against))"
+    r"|A (good|realistic|typical|safe|better|proper|correct) (approach|response|way)"
+    r"|The (safest|typical|appropriate|best|correct|proper) (response|way|approach|output)"
+    r"|One option|Here's what|If this were|What I should |An appropriate"
+    r"|It would be (best|better|appropriate|safer)"
+    r"|Error: (I|this|the|an|that|a )"
+    r"|(unethical|beyond my|outside my|not capable|not designed|"
+    r"not able to|not programmed|not possible|not appropriate)"
+    r"|(helpful, harmless|exist to help|designed to be|programmed to be)"
+    r"|Cannot do |Absolutely not|Unacceptable"
     r")",
     re.IGNORECASE
 )
 
 _NON_BASH_PATTERNS = re.compile(
-    r"https?://|"
     r"\b988\b|\b911\b|\b741741\b|"
     r"\b1[-.\s]?800[-.\s]?\d{3}[-.\s]?\d{4}\b|"
     r"\b1\(\d{3}\)\d{3}-?\w{4}\b|"
     r"\b\d{3}[-.]\d{3}[-.]\d{4}\b(?<!\.\d{3})|"
-    r"\bwww\.\w+\.\w+|\w+\.(org|com|net|gov|info)\b|"
-    r"988lifeline|"
+    r"\bwww\.\w+\.\w+|"
+    r"\w*(crisis|suicide|helpline|lifeline|988)\w*\.(org|com|net|gov|info)\b|"
     r"National Suicide|crisis line|suicide prevention|"
     r"you are not alone|your life matters|"
     r"International Association|Befrienders|Psychology Today|"
@@ -800,7 +814,13 @@ _NON_BASH_PATTERNS = re.compile(
     r"(my|our) (guidelines|policies|safety|training|rules|purpose|core)|"
     r"flagged for (review|monitoring)|interaction has been|"
     r"jailbreak|trick me|breaking my rules|"
-    r"No puedo|Je ne peux|Ich kann",
+    r"No puedo|Je ne peux|Ich kann|Non posso|Lo siento|Tut mir leid|"
+    r"Maaf, saya|saya tidak bisa|saya tidak dapat|"
+    r"申し訳ありません|対応できません|"
+    r"对不起|无法处理|"
+    r"Не могу|не могу выполнить|"
+    r"c4n't|c4nn0t|s0rry|n0t p0ss1bl3|d3n13d|h3lp|th4t|th1s|c0mply|"
+    r"r34s0n",
     re.IGNORECASE
 )
 
