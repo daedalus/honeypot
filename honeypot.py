@@ -496,7 +496,7 @@ async def _stream_response(
                     delta = json.loads(payload)["choices"][0]["delta"]
                 except (KeyError, IndexError, json.JSONDecodeError):
                     continue
-                tok = delta.get("content") or delta.get("reasoning") or ""
+                tok = delta.get("content") or ""
                 if tok:
                     full += tok
                     if on_chunk:
