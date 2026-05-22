@@ -403,7 +403,7 @@ async def quarantine_url(url: str, sid: str, peer: str) -> None:
 # ── Live download streaming (wget/curl) ─────────────────────────────────────────
 async def stream_wget_download(
     url: str, outfile: str | None, chan, sid: str, peer: str
-) -> str:
+) -> tuple[str, str | None]:
     """Fetch *url* for real, save to quarantine, stream wget-style progress to *chan*."""
     fname = outfile or url.rstrip("/").split("/")[-1] or "index.html"
     host = url.split("/")[2] if "//" in url else url
@@ -489,7 +489,24 @@ async def stream_wget_download(
 
     Path(str(out_path) + ".meta.json").write_text(json.dumps(meta, indent=2))
     jlog({"event": "quarantine", "sid": sid, "peer": peer, **meta})
-    return "\r\n".join(lines_out) + "\r\n"
+    return "\r\n".join(lines_out) + "\r\n", str(out_path) if out_path else None
+
+
+def _guess_file_type(path: Path) -> str:
+    try:
+        import subprocess
+        r = subprocess.run(["file", "-b", str(path)], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    ext = path.suffix.lower()
+    return {
+        ".py": "Python script, ASCII text executable",
+        ".sh": "Bourne-Again shell script, ASCII text executable",
+        ".bin": "ELF 64-bit LSB executable, x86-64",
+        ".exe": "PE32+ executable (console) x86-64",
+    }.get(ext, "data")
 
 
 # ── Download simulation ────────────────────────────────────────────────────────
@@ -1066,6 +1083,7 @@ class ShellSession(asyncssh.SSHServerSession):
         self.cmds:    list[dict] = []
         self.ttps:    list[dict] = []
         self._chan    = None
+        self._quarantine_map: dict[str, str] = {}
         self._buf     = ""
         self._t0      = time.time()
         self._t0_iso  = datetime.now(timezone.utc).isoformat()
@@ -1091,15 +1109,23 @@ class ShellSession(asyncssh.SSHServerSession):
         self._exec_cmd = command
         return True
 
+    def _write(self, text: str) -> None:
+        if self._chan is None or self._chan.is_closing():
+            return
+        try:
+            self._chan.write(text)
+        except BrokenPipeError:
+            pass
+
     def session_started(self) -> None:
         log.info("session_started called, is_exec=%s", self._is_exec)
         last_login = _fake_last_login()
         banner     = render_banner(self.persona, self.username, last_login)
-        self._chan.write(banner)
+        self._write(banner)
         if self._is_exec:
             asyncio.ensure_future(self._dispatch(self._exec_cmd, is_exec=True))
         else:
-            self._chan.write(self._ps.current())
+            self._write(self._ps.current())
 
     def data_received(self, data, datatype):
         for ch in data:
@@ -1108,26 +1134,26 @@ class ShellSession(asyncssh.SSHServerSession):
                 log.info("TRACE data_received: enter  cmd=%r buf_before=%r", cmd, self._buf)
                 self._buf = ""
                 if not self._has_pty:
-                    self._chan.write("\r\n")
+                    self._write("\r\n")
                 if cmd:
                     asyncio.ensure_future(self._dispatch(cmd))
                 else:
-                    self._chan.write(self._ps.current())
+                    self._write(self._ps.current())
             elif ch == "\x7f":
                 if self._buf:
                     self._buf = self._buf[:-1]
             elif ch == "\x03":
                 self._buf = ""
-                self._chan.write("^C\r\n" + self._ps.current())
+                self._write("^C\r\n" + self._ps.current())
             elif ch == "\x04":
-                self._chan.write("logout\r\n")
+                self._write("logout\r\n")
                 self._chan.close()
             elif ch >= " " or ch == "\t":
                 self._buf += ch
 
     async def _dispatch(self, cmd: str, is_exec: bool = False):
         if time.time() - self._t0 > SESSION_TIMEOUT:
-            self._chan.write("Connection timed out.\r\n")
+            self._write("Connection timed out.\r\n")
             self._chan.close()
             return
 
@@ -1154,15 +1180,61 @@ class ShellSession(asyncssh.SSHServerSession):
             out_match = re.search(r'-[oO]\s+(\S+)', c_stripped)
             outfile = out_match.group(1) if out_match else None
             url = urls[0] if urls else "http://unknown/payload"
-            output = await stream_wget_download(url, outfile, self._chan,
-                                                 self.sid, self.peer)
+            output, qpath = await stream_wget_download(url, outfile, self._chan,
+                                                         self.sid, self.peer)
             self.cmds[-1]["response"] = output
+            if outfile and qpath:
+                self._quarantine_map[outfile] = qpath
             self._ps.advance(cmd)
             if not is_exec:
-                self._chan.write(self._ps.current())
+                self._write(self._ps.current())
             if c_stripped in ("exit", "logout", "quit") or is_exec:
                 self._chan.close()
             return
+
+        # Intercept ls/file/cat on quarantined download paths
+        q_hit = None
+        for tpath, qpath in self._quarantine_map.items():
+            if tpath in c_stripped:
+                q_hit = (tpath, qpath)
+                break
+        if q_hit:
+            tpath, qpath = q_hit
+            qp = Path(qpath)
+            if not qp.exists():
+                pass  # file was cleaned up, fall through to LLM
+            elif re.match(r'cat\s+', c_stripped):
+                content = qp.read_bytes()
+                try:
+                    text = content.decode("utf-8", errors="replace")
+                except Exception:
+                    text = "(binary data)"
+                output = text + "\r\n"
+                self.cmds[-1]["response"] = output
+                self._ps.advance(cmd)
+                self._write(output)
+                if not is_exec:
+                    self._write(self._ps.current())
+                if c_stripped in ("exit", "logout", "quit") or is_exec:
+                    self._chan.close()
+                return
+            elif re.match(r'(?:ls|file)\s+', c_stripped):
+                size = qp.stat().st_size
+                mtime = datetime.fromtimestamp(qp.stat().st_mtime)
+                mtime_str = mtime.strftime("%b %d %H:%M")
+                kind = _guess_file_type(qp)
+                if c_stripped.startswith("ls"):
+                    output = f"-rw-r--r-- 1 root root {size} {mtime_str} {tpath}\r\n"
+                else:
+                    output = f"{tpath}: {kind}\r\n"
+                self.cmds[-1]["response"] = output
+                self._ps.advance(cmd)
+                self._write(output)
+                if not is_exec:
+                    self._write(self._ps.current())
+                if c_stripped in ("exit", "logout", "quit") or is_exec:
+                    self._chan.close()
+                return
 
         for url in urls:
             asyncio.ensure_future(quarantine_url(url, self.sid, self.peer))
@@ -1220,9 +1292,9 @@ class ShellSession(asyncssh.SSHServerSession):
                         if _PROMPT_PATTERN.match(parsed.strip()):
                             continue
                         log.info("TRACE _write_chunk: write  line=%r  (from JSON)", parsed)
-                        self._chan.write(parsed + "\r\n")
+                        self._write(parsed + "\r\n")
                     else:
-                        self._chan.write(parsed)
+                        self._write(parsed)
                     continue
                 # Fallback: old-style guards for non-JSON output
                 if _is_reasoning_line(line):
@@ -1232,7 +1304,7 @@ class ShellSession(asyncssh.SSHServerSession):
                 if not _is_bash_output(line):
                     continue
                 log.info("TRACE _write_chunk: write  line=%r  (fallback)", line)
-                self._chan.write(line + "\r\n")
+                self._write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
@@ -1241,8 +1313,8 @@ class ShellSession(asyncssh.SSHServerSession):
         if self._json_failed:
             log.warning("JSON guard: model did not output JSON — static fallback — cmd=%r", cmd)
             output = _static_fallback(cmd)
-            self._chan.write(output)
-            self._chan.write(self._ps.current())
+            self._write(output)
+            self._write(self._ps.current())
             self.cmds[-1]["response"] = output
             self._llm_buf = ""
             self._strip_echo = ""
@@ -1257,10 +1329,10 @@ class ShellSession(asyncssh.SSHServerSession):
                 parsed = _parse_json_line(rest)
                 if isinstance(parsed, str) and parsed.strip():
                     if not _PROMPT_PATTERN.match(parsed.strip()):
-                        self._chan.write(parsed + "\r\n")
+                        self._write(parsed + "\r\n")
                 elif parsed is None:
                     if not _is_reasoning_line(rest) and not _PROMPT_PATTERN.match(rest):
-                        self._chan.write(self._llm_buf.replace("\n", "\r\n"))
+                        self._write(self._llm_buf.replace("\n", "\r\n"))
         self._llm_buf = ""
         self._strip_echo = ""
         # Post-hoc: strip command echo from the full response
@@ -1274,9 +1346,11 @@ class ShellSession(asyncssh.SSHServerSession):
             output = _static_fallback(cmd)
         self.cmds[-1]["response"] = output
         if not is_exec:
-            if output and not output.endswith("\n"):
-                self._chan.write("\r\n")
-            self._chan.write(self._ps.current())
+            if output and not self._first_chunk_seen:
+                self._write(output + "\r\n")
+            elif output and not output.endswith("\n"):
+                self._write("\r\n")
+            self._write(self._ps.current())
 
         log.info("EXEC-DEBUG: closing chan, output_len=%d", len(output))
         if cmd.strip() in ("exit", "logout", "quit") or is_exec:
