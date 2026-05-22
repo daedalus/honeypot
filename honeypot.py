@@ -35,6 +35,7 @@ import asyncssh
 import httpx
 
 from personas import ALL_PERSONAS, DEFAULT_PERSONA, Persona
+import simulator
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_PORT        = 2222
@@ -387,6 +388,7 @@ async def quarantine_url(url: str, sid: str, peer: str) -> None:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.get(url, headers={"User-Agent": "curl/7.88.1"})
             out.write_bytes(r.content)
+            asyncio.ensure_future(simulator.analyze_file(out, safe_name))
             meta.update({"status": r.status_code, "size": len(r.content),
                           "content_type": r.headers.get("content-type", ""),
                           "saved": str(out)})
@@ -466,6 +468,7 @@ async def stream_wget_download(
                             chan.write(line)
 
                     out_path.write_bytes(bytes(buf))
+                    asyncio.ensure_future(simulator.analyze_file(out_path, fname))
                     meta.update({"status": resp.status_code, "size": len(buf),
                                   "content_type": ct, "saved": str(out_path)})
                     log.info("WGET live %s → %s (%d bytes)", url, out_path.name, len(buf))
@@ -597,6 +600,43 @@ async def _stream_response(
     return full
 
 
+async def _llm_complete(messages: list[dict]) -> str:
+    """Non-streaming LLM call through the first alive model.  Returns empty on failure."""
+    for model_id in list(_model_chain):
+        if model_id in _model_dead:
+            continue
+        provider = _resolve_provider(model_id)
+        model_name = _strip_provider(model_id)
+        api_key = _get_api_key(provider)
+        base_url = _get_base_url(provider)
+        if not api_key or not base_url:
+            _model_dead.add(model_id)
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}",
+                             "content-type": "application/json"},
+                    json={"model": model_name, "max_tokens": 1024,
+                          "messages": messages},
+                )
+                if resp.status_code in (402, 429):
+                    _model_dead.add(model_id)
+                    continue
+                if 500 <= resp.status_code < 600:
+                    _model_dead.add(model_id)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as exc:
+            log.warning("_llm_complete %s failed: %s", model_id, exc)
+            _model_dead.add(model_id)
+            continue
+    return ""
+
+
 async def llm_shell(
     history: list[dict], cmd: str, system_prompt: str,
     on_chunk=None,
@@ -607,8 +647,11 @@ async def llm_shell(
     if re.match(r'chmod\s+\+x', c, re.I):
         return ""
 
-    # Execution attempt — always fail
+    # Execution attempt — use sim pack if available, else fall back to static
     if re.match(r'(\./|bash\s+\S+|sh\s+\S+|python\S*\s+\S+)', c):
+        sim = simulator.simulate_exec(c)
+        if sim:
+            return sim
         return fake_execution()
 
     # If no model chain has a usable API key, fall through to static
@@ -1445,6 +1488,7 @@ def main():
     args = p.parse_args()
     _log_file        = args.log
     _quarantine_dir  = args.quarantine
+    simulator.quarantine_dir = _quarantine_dir
     _sessions_dir    = args.sessions_dir
     _selected_persona = args.persona
     _auto_discover   = args.auto_discover
@@ -1465,6 +1509,7 @@ def main():
                 await _run_health_check()
                 _save_health_cache()
         asyncio.run(_startup())
+        simulator.llm_ask = _llm_complete
         asyncio.run(run(args.port))
     except KeyboardInterrupt:
         log.info("Stopped.")
