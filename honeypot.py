@@ -899,7 +899,7 @@ class ShellSession(asyncssh.SSHServerSession):
         for ch in data:
             if ch in ("\r", "\n"):
                 cmd = self._buf.strip()
-                log.debug("TRACE data_received: enter  cmd=%r buf_before=%r", cmd, self._buf)
+                log.info("TRACE data_received: enter  cmd=%r buf_before=%r", cmd, self._buf)
                 self._buf = ""
                 self._chan.write("\r\n")
                 if cmd:
@@ -909,7 +909,6 @@ class ShellSession(asyncssh.SSHServerSession):
             elif ch == "\x7f":
                 if self._buf:
                     self._buf = self._buf[:-1]
-                    self._chan.write("\b \b")
             elif ch == "\x03":
                 self._buf = ""
                 self._chan.write("^C\r\n" + self._ps.current())
@@ -918,7 +917,6 @@ class ShellSession(asyncssh.SSHServerSession):
                 self._chan.close()
             elif ch >= " " or ch == "\t":
                 self._buf += ch
-                self._chan.write(ch)
 
     async def _dispatch(self, cmd: str, is_exec: bool = False):
         if time.time() - self._t0 > SESSION_TIMEOUT:
@@ -952,7 +950,7 @@ class ShellSession(asyncssh.SSHServerSession):
         self._llm_buf = ""
 
         def _write_chunk(text):
-            log.debug("TRACE _write_chunk: enters  text=%r strip_echo=%r", text, getattr(self, "_strip_echo", ""))
+            log.info("TRACE _write_chunk: enters  text=%r strip_echo=%r", text, getattr(self, "_strip_echo", ""))
             # Phase 1: strip command echo
             rem = getattr(self, "_strip_echo", "")
             if rem:
@@ -967,12 +965,12 @@ class ShellSession(asyncssh.SSHServerSession):
                         break
                 self._strip_echo = rem
                 if not text:
-                    log.debug("TRACE _write_chunk: text emptied by echo strip — return")
+                    log.info("TRACE _write_chunk: text emptied by echo strip — return")
                     return
                 if all_matched:
-                    log.debug("TRACE _write_chunk: all matched echo — return")
+                    log.info("TRACE _write_chunk: all matched echo — return")
                     return
-                log.debug("TRACE _write_chunk: echo strip done  remaining=%r strip_echo=%r", text, rem)
+                log.info("TRACE _write_chunk: echo strip done  remaining=%r strip_echo=%r", text, rem)
             # Phase 2: line-level reasoning guard
             self._llm_buf += text
             while "\n" in self._llm_buf:
@@ -985,16 +983,16 @@ class ShellSession(asyncssh.SSHServerSession):
                 # Drop non-bash output (safety override, URLs, crisis resources)
                 if not _is_bash_output(line):
                     continue
-                log.debug("TRACE _write_chunk: write  line=%r", line)
+                log.info("TRACE _write_chunk: write  line=%r", line)
                 self._chan.write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
-        log.debug("TRACE _dispatch: raw output=%r", output)
+        log.info("TRACE _dispatch: raw output=%r", output)
         # Flush remaining buffered text
         if self._llm_buf:
             rest = self._llm_buf.strip()
-            log.debug("TRACE _dispatch: flush buf=%r", self._llm_buf)
+            log.info("TRACE _dispatch: flush buf=%r", self._llm_buf)
             if rest and not _is_reasoning_line(rest) and not _PROMPT_PATTERN.match(rest):
                 self._chan.write(self._llm_buf.replace("\n", "\r\n"))
         self._llm_buf = ""
