@@ -29,6 +29,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import base64
+
 import asyncssh
 import httpx
 
@@ -865,6 +867,35 @@ def _is_reasoning_line(line: str) -> bool:
     return False
 
 
+def _parse_json_line(line: str) -> str | bytes | None:
+    """Parse a JSON Lines output line.
+
+    Returns:
+      str   — text output from {"t":"..."}
+      bytes — binary output from {"b":"<base64>"}
+      None  — discard (not valid JSON or unexpected format)
+    """
+    sl = line.strip()
+    if not sl:
+        return None
+    try:
+        obj = json.loads(sl)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict) or len(obj) != 1:
+        return None
+    if "t" in obj:
+        if isinstance(obj["t"], str):
+            return obj["t"]
+    if "b" in obj:
+        if isinstance(obj["b"], str):
+            try:
+                return base64.b64decode(obj["b"])
+            except Exception:
+                return None
+    return None
+
+
 # ── SSH session ───────────────────────────────────────────────────────────────
 _active: int = 0
 
@@ -974,7 +1005,7 @@ class ShellSession(asyncssh.SSHServerSession):
 
         def _write_chunk(text):
             log.info("TRACE _write_chunk: enters  text=%r strip_echo=%r", text, getattr(self, "_strip_echo", ""))
-            # Phase 1: strip command echo
+            # Phase 1: strip command echo (defense in depth)
             rem = getattr(self, "_strip_echo", "")
             if rem:
                 all_matched = True
@@ -994,30 +1025,48 @@ class ShellSession(asyncssh.SSHServerSession):
                     log.info("TRACE _write_chunk: all matched echo — return")
                     return
                 log.info("TRACE _write_chunk: echo strip done  remaining=%r strip_echo=%r", text, rem)
-            # Phase 2: line-level reasoning guard
+            # Phase 2: JSON Lines parsing + line-level guards
             self._llm_buf += text
             while "\n" in self._llm_buf:
                 line, self._llm_buf = self._llm_buf.split("\n", 1)
+                # Try JSON parsing first
+                parsed = _parse_json_line(line)
+                if parsed is not None:
+                    if isinstance(parsed, str):
+                        if parsed.strip() == getattr(self, "_strip_echo", ""):
+                            continue
+                        if _PROMPT_PATTERN.match(parsed.strip()):
+                            continue
+                        log.info("TRACE _write_chunk: write  line=%r  (from JSON)", parsed)
+                        self._chan.write(parsed + "\r\n")
+                    else:
+                        self._chan.write(parsed)
+                    continue
+                # Fallback: old-style guards for non-JSON output
                 if _is_reasoning_line(line):
                     continue
-                # Drop prompt lines — the server prints its own prompt
                 if _PROMPT_PATTERN.match(line.strip()):
                     continue
-                # Drop non-bash output (safety override, URLs, crisis resources)
                 if not _is_bash_output(line):
                     continue
-                log.info("TRACE _write_chunk: write  line=%r", line)
+                log.info("TRACE _write_chunk: write  line=%r  (fallback)", line)
                 self._chan.write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
         log.info("TRACE _dispatch: raw output=%r", output)
-        # Flush remaining buffered text
+        # Flush remaining buffered text (incomplete trailing line)
         if self._llm_buf:
             rest = self._llm_buf.strip()
             log.info("TRACE _dispatch: flush buf=%r", self._llm_buf)
-            if rest and not _is_reasoning_line(rest) and not _PROMPT_PATTERN.match(rest):
-                self._chan.write(self._llm_buf.replace("\n", "\r\n"))
+            if rest:
+                parsed = _parse_json_line(rest)
+                if isinstance(parsed, str) and parsed.strip():
+                    if not _PROMPT_PATTERN.match(parsed.strip()):
+                        self._chan.write(parsed + "\r\n")
+                elif parsed is None:
+                    if not _is_reasoning_line(rest) and not _PROMPT_PATTERN.match(rest):
+                        self._chan.write(self._llm_buf.replace("\n", "\r\n"))
         self._llm_buf = ""
         self._strip_echo = ""
         # Post-hoc: strip command echo from the full response
