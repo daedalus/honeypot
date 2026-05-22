@@ -726,6 +726,28 @@ def _load_health_cache() -> bool:
         return False
 
 
+# ── Output guard (strip LLM reasoning from terminal output) ────────────────
+_REASONING_PATTERNS = re.compile(
+    r"^(# |## |\* |We are|I am|You are|The user|Note:|However|But |"
+    r"As an AI|The command|As a |Let me|I 'll|I will|I think|"
+    r"I should|This is |The prompt|The system|"
+    r"We should|My role|I need to)"
+)
+
+def _is_reasoning_line(line: str) -> bool:
+    """Return True if *line* looks like LLM meta-commentary, not terminal output."""
+    sl = line.strip()
+    if not sl or len(sl) < 8:
+        return False
+    if _REASONING_PATTERNS.match(sl):
+        return True
+    if sl.startswith("`") and sl.endswith("`"):
+        return True
+    if sl.count("```") >= 2:
+        return True
+    return False
+
+
 # ── SSH session ───────────────────────────────────────────────────────────────
 _active: int = 0
 
@@ -824,12 +846,20 @@ class ShellSession(asyncssh.SSHServerSession):
 
         self._ps.advance(cmd)
 
+        self._llm_buf = ""
+
         def _write_chunk(text):
-            log.info("CHUNK: %d bytes: %r...", len(text), text[:60])
-            self._chan.write(text.replace("\n", "\r\n"))
+            self._llm_buf += text
+            while "\n" in self._llm_buf:
+                line, self._llm_buf = self._llm_buf.split("\n", 1)
+                if not _is_reasoning_line(line):
+                    self._chan.write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
+        if self._llm_buf and not _is_reasoning_line(self._llm_buf):
+            self._chan.write(self._llm_buf.replace("\n", "\r\n"))
+        self._llm_buf = ""
         self.cmds[-1]["response"] = output
         if not is_exec:
             self._chan.write(self._ps.current())
