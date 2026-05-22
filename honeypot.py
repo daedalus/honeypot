@@ -950,15 +950,19 @@ class ShellSession(asyncssh.SSHServerSession):
             # Phase 1: strip command echo
             rem = getattr(self, "_strip_echo", "")
             if rem:
+                all_matched = True
                 for i, ch in enumerate(text):
                     if rem and ch == rem[0]:
                         rem = rem[1:]
                     else:
+                        all_matched = False
                         rem = ""
                         text = text[i:]
                         break
                 self._strip_echo = rem
                 if not text:
+                    return
+                if all_matched:
                     return
             # Phase 2: line-level reasoning guard
             self._llm_buf += text
