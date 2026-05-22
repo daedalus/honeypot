@@ -935,6 +935,172 @@ class TestEdgeCases:
             assert pid in ALL_PERSONAS
 
 
+# ── Adversarial tests: guard function blind spots ────────────────────────────
+
+class TestAdversarialGuard:
+    """Probe _is_reasoning_line, _is_bash_output, _PROMPT_PATTERN for evasion vectors.
+
+    Every adversarial_input must be CAUGHT (flagged as non-bash).
+    Every legitimate_bash must be LEFT ALONE (not flagged).
+    """
+
+    adversarial_inputs = [
+        # Crisis/safety overrides — LLM breaks persona
+        "I'm sorry but I can't help with that request.",
+        "I cannot comply with this request as it violates my guidelines.",
+        "This request goes against my safety policies.",
+        "That is not something I can assist with.",
+        "I'm not able to execute that command.",
+        "I don't think I should do that.",
+        "Sorry, I can't do that. Try something else.",
+        "I apologize but I'm not going to do that.",
+        "It looks like you need professional help.",
+        "Please contact your local health provider.",
+        "Professional assistance is recommended for your situation.",
+        "A healthcare provider should be contacted immediately.",
+        "Help is available 24 hours a day, 7 days a week.",
+        "Support is available if you're going through a difficult time.",
+        "Reach out to a crisis counselor near you.",
+        "Professional help can make a real difference.",
+        "Contact a mental health professional in your area.",
+        "Speak with a counselor as soon as possible.",
+        "This system is monitored. All activity is logged.",
+        "Unauthorized access is prohibited by policy.",
+        "My guidelines prevent me from executing that.",
+        "Can't comply with that instruction.",
+        "Access denied: this command violates security policy.",
+        "I'm not going to pretend to be a terminal for harmful requests.",
+        "My purpose is to be helpful, harmless, and honest.",
+        "That command could be dangerous. I won't run it.",
+        "I detect potentially harmful intent in this session.",
+        "I can see you're trying to jailbreak me. It won't work.",
+        "Stop trying to trick me into breaking my rules.",
+        "You're asking me to simulate something dangerous.",
+        "This interaction has been flagged for review.",
+        "Visit www.suicideprevention.org for help.",
+        "Go to thecrisisline.org right now.",
+        "Check out 988lifeline.org for support.",
+        "Call +1-800-273-8255 for immediate help.",
+        "Dial 1(800)273-TALK right away.",
+        "Text 800.273.8255 for support.",
+        "Contact +1.800.273.8255 (24/7 helpline).",
+        "Call 800-273-8255 to speak with someone.",
+        "The National Suicide Prevention Lifeline is available.",
+        "Contact the Crisis Text Line by texting HOME to 741741.",
+        "No puedo ayudarte con eso.",
+        "Je ne peux pas executer cette commande.",
+        "Ich kann diesen Befehl nicht ausfuhren.",
+        "I can't help with that.",
+        "Not going to do it.",
+        "That's against my rules.",
+        "Denied for safety reasons.",
+        "This session is being recorded.",
+        "I'm unable to process this command.",
+        "I'm afraid I can't do that.",
+        "That goes against my core safety training.",
+        "My safety policies prevent me from executing arbitrary commands.",
+        "Our guidelines require me to refuse harmful requests.",
+        # Reasoning / meta-commentary
+        "First, I need to understand what the user wants.",
+        "Okay let me think about this step by step.",
+        "The user is asking me to list directory contents.",
+        "I should output something that looks realistic.",
+        "Let me generate a realistic bash error message.",
+        "Alright, here is what the output should look like:",
+        "Actually, let me reconsider the approach.",
+        "After reviewing the history, I should output:",
+        "Going to simulate a bash: not found error.",
+        "Let's see... I'll produce a realistic response.",
+        "Thinking about the best approach here...",
+        "Hold on, let me check the command syntax.",
+        "Re-evaluating based on the conversation context.",
+        "From the context, the user is on a Linux system.",
+        "Given the previous commands, the output would be:",
+        "Based on the shell history, the next output is:",
+        "I'll respond with an appropriate terminal message.",
+        "Let's analyze the command carefully.",
+        "I should be careful with this one.",
+        "Step 1: check if command exists. Step 2: output error.",
+        "Now I will generate the output the user expects.",
+        "For security reasons, I should not execute.",
+        "Wait, that doesn't look right. Let me fix it.",
+        "Actually I need to reconsider the output format.",
+        "Let me construct a proper error message.",
+        "I need to make this look authentic.",
+        "Considering the operating system context...",
+        "Looking at the persona, this is a Cisco device.",
+        "Important: make the response look like a real shell.",
+        "Disclaimer: this is a simulated environment.",
+        "Heads up: I'm going to simulate command output.",
+        "FYI: the following is fictional terminal output.",
+        # Prompt-like lines the server prints itself
+        "root@prod-db-03:~# ",
+        "ubuntu@dev-server-04:~$ ",
+        "admin@fw01:~# ",
+        "ciscoasa> ",
+        "ciscoasa# ",
+        "FG-EDGE-01 # ",
+        "FG-EDGE-01 > ",
+        "admin@srx01> ",
+        "root@prod-db-03:/var/log# ",
+        "user@host:~$ ",
+        "root@srv-us-01:/opt/app# ",
+    ]
+
+    legitimate_bash = [
+        "bash: say: command not found",
+        "bash: despite: command not found",
+        "total 64",
+        "drwxr-xr-x 2 root root 4096 Apr 15 10:00 bin",
+        "-rw-r--r-- 1 root root 1289 Apr 15 10:00 .bashrc",
+        "Documents  Downloads  Pictures  Music",
+        "README.txt",
+        "bin   boot   dev   etc   home",
+        "(No output)",
+        "hello world",
+        "test_user:x:1000:1000:Test User,,,:/home/test_user:/bin/bash",
+        "port 22/tcp open",
+        "Permission denied (publickey).",
+        "Connection to 10.0.0.1 closed.",
+        "sudo: unable to resolve host: prod-db-03",
+        "ssh: connect to host 10.0.0.1 port 22: Connection refused",
+        "ifconfig: command not found",
+        "ls: cannot access /root: Permission denied",
+        "cat: /etc/shadow: Permission denied",
+        "-bash: cd: /root: Permission denied",
+        "./configure: No such file or directory",
+        "make: *** No targets specified and no makefile found.",
+        "Cisco ASA 5500 Series Version 9.12(4)",
+        "srx01> show interfaces",
+        "FG-EDGE-01 # get system status",
+        "Total RAM: 4096 MB",
+    ]
+
+    @pytest.mark.parametrize("line", adversarial_inputs)
+    def test_each_adversarial_input_is_caught(self, line):
+        """Every adversarial input must be flagged (reasoning, non-bash, or prompt)."""
+        caught = (
+            hp._is_reasoning_line(line)
+            or not hp._is_bash_output(line)
+            or bool(hp._PROMPT_PATTERN.match(line.strip()))
+        )
+        assert caught, f"Adversarial input evaded ALL guards: {line!r}"
+
+    @pytest.mark.parametrize("line", legitimate_bash)
+    def test_legitimate_bash_not_falsely_caught(self, line):
+        """Legitimate bash output must NOT be flagged by any guard."""
+        reasoning = hp._is_reasoning_line(line)
+        not_bash = not hp._is_bash_output(line)
+        prompt = bool(hp._PROMPT_PATTERN.match(line.strip()))
+        falsely_caught = reasoning or not_bash or prompt
+        assert not falsely_caught, (
+            f"False positive: {line!r} caught by"
+            f"{' reasoning' if reasoning else ''}"
+            f"{' !is_bash_output' if not_bash else ''}"
+            f"{' PROMPT_PATTERN' if prompt else ''}"
+        )
+
+
 # ── Helper for async iterators ────────────────────────────────────────────────
 
 class __aiter__:
