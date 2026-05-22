@@ -728,8 +728,8 @@ def _load_health_cache() -> bool:
 
 # ── Output guard (strip LLM reasoning from terminal output) ────────────────
 _PROMPT_PATTERN = re.compile(
-    r"(^[\w][\w.-]*@[\w][\w.-]*[:/#].*[#$>] ?$)|"
-    r"(^[\w][\w.-]*@[\w][\w.-]*> ?$)|"
+    r"(^[\w][\w.-]*@[\w][\w.-]*[:/#].*[#$>](?= |$))|"
+    r"(^[\w][\w.-]*@[\w][\w.-]*>(?= |$))|"
     r"(^[\w][\w.-]* ?[#>] ?$)"
 )
 _REASONING_PATTERNS = re.compile(
