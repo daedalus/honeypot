@@ -398,6 +398,97 @@ async def quarantine_url(url: str, sid: str, peer: str) -> None:
     jlog({"event": "quarantine", "sid": sid, "peer": peer, **meta})
 
 
+# ── Live download streaming (wget/curl) ─────────────────────────────────────────
+async def stream_wget_download(
+    url: str, outfile: str | None, chan, sid: str, peer: str
+) -> str:
+    """Fetch *url* for real, save to quarantine, stream wget-style progress to *chan*."""
+    fname = outfile or url.rstrip("/").split("/")[-1] or "index.html"
+    host = url.split("/")[2] if "//" in url else url
+    port = 443 if url.startswith("https") else 80
+    is_https = port == 443
+    _quarantine_dir.mkdir(exist_ok=True)
+    safe_name = re.sub(r"[^\w\-.]", "_", url)[:120]
+    ts_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    out_path = _quarantine_dir / f"{ts_stamp}_{safe_name}"
+    lines_out: list[str] = []
+    meta: dict = {"url": url, "sid": sid, "peer": peer,
+                  "ts": datetime.now(timezone.utc).isoformat()}
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    def w(s: str) -> None:
+        chan.write(s + "\r\n")
+        lines_out.append(s)
+
+    fake_ip = f"{random.randint(1,254)}.{random.randint(1,254)}." \
+              f"{random.randint(1,254)}.{random.randint(1,254)}"
+    now = datetime.now(timezone.utc)
+    date_hdr = f"--{now.strftime('%Y-%m-%d %H:%M:%S')}--  {url}"
+
+    try:
+        w(date_hdr)
+        w(f"Resolving {host} ({host})... {fake_ip}")
+
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            # Connecting message shown only after httpx resolves DNS + opens TCP
+            async with client.stream(
+                    "GET", url,
+                    headers={"User-Agent": f"{'Wget/1.21.4' if not is_https else 'curl/7.88.1'}"}
+                ) as resp:
+                    w(f"Connecting to {host} ({host})|{fake_ip}|:{port}... connected.")
+                    ct = resp.headers.get("content-type", "application/octet-stream")
+                    cl = resp.headers.get("content-length")
+                    status_line = f"HTTP request sent, awaiting response... {resp.status_code}"
+                    if resp.status_code == 200:
+                        status_line += " OK"
+                    w(status_line)
+
+                    if cl:
+                        w(f"Length: {cl} ({int(cl)//1024}K) [{ct}]")
+                    else:
+                        w(f"Length: unspecified [{ct}]")
+                    w(f"Saving to: '{fname}'\r\n")
+
+                    downloaded = 0
+                    total = int(cl) if cl else 0
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf.extend(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = min(100, int(downloaded * 100 / total))
+                            bar = "=" * (pct // 2) + (">" if pct < 100 else "=")
+                            bar = bar[:50].ljust(50, " ")
+                            speed = random.randint(200, 900)
+                            sec = f"0.{random.randint(1,9)}s"
+                            line = (f"\r{fname}           {pct}%[{bar}]  "
+                                    f"{downloaded//1024:>6}K  {speed}KB/s    in {sec}")
+                            chan.write(line)
+
+                    out_path.write_bytes(bytes(buf))
+                    meta.update({"status": resp.status_code, "size": len(buf),
+                                  "content_type": ct, "saved": str(out_path)})
+                    log.info("WGET live %s → %s (%d bytes)", url, out_path.name, len(buf))
+
+                    total_k = len(buf) // 1024
+                    w(f"\r\n\r\n'{fname}' saved [{len(buf)}/{total_k}K]")
+    except httpx.ConnectError:
+        w(f"Resolving {host} ({host})... failed: Name or service not known.")
+        w(f"wget: unable to resolve host address '{host}'")
+        meta["error"] = "ConnectError"
+    except httpx.TimeoutException:
+        w("wget: download timed out after 30 seconds.")
+        meta["error"] = "timeout"
+    except Exception as exc:
+        w(f"wget: download failed — {exc}")
+        meta["error"] = str(exc)
+        log.warning("WGET download threw %s: %s", type(exc).__name__, exc)
+
+    Path(str(out_path) + ".meta.json").write_text(json.dumps(meta, indent=2))
+    jlog({"event": "quarantine", "sid": sid, "peer": peer, **meta})
+    return "\r\n".join(lines_out) + "\r\n"
+
+
 # ── Download simulation ────────────────────────────────────────────────────────
 def fake_download(url: str, outfile: str | None) -> str:
     fname = outfile or url.rstrip("/").split("/")[-1] or "index.html"
@@ -511,14 +602,6 @@ async def llm_shell(
     on_chunk=None,
 ) -> str:
     c = cmd.strip()
-
-    # wget / curl — fake download; real URL to quarantine happens outside
-    if re.search(r'\b(wget|curl)\b', c, re.I):
-        urls      = extract_urls(c)
-        out_match = re.search(r'-[oO]\s+(\S+)', c)
-        outfile   = out_match.group(1) if out_match else None
-        url       = urls[0] if urls else "http://unknown/payload"
-        return fake_download(url, outfile)
 
     # chmod +x — silent
     if re.match(r'chmod\s+\+x', c, re.I):
@@ -864,14 +947,30 @@ def _is_reasoning_line(line: str) -> bool:
         return True
     if sl.count("```") >= 2:
         return True
-    # Prose heuristic: starts with capital letter only (not all-caps like PING),
-    # has 6+ words, ends with sentence punctuation — almost certainly reasoning.
+    # Prose heuristic: starts with sentence-case capital (not all-caps like PING),
+    # has 5+ words, ends with sentence punctuation, AND contains at least one
+    # reasoning marker (pronoun, uncertainty, intention).  This prevents false
+    # positives on legitimate bash output like "Press any key to continue..."
+    # or "Connection closed by remote host."
     words = sl.split()
-    if len(words) >= 6 and sl[0].isupper():
+    if len(words) >= 5 and sl[0].isupper():
         if len(sl) > 2 and sl[1].isupper():
             return False  # all-caps start like PING, SSH, TCP
         last = sl[-1]
         if last in ".!?":
+            if re.search(r'\d', sl):
+                return False  # digits → likely terminal output
+            if sl.rstrip().endswith("..."):
+                return False  # program prompts, progress bars
+            if not re.search(
+                r'\b(we|i|my|our|us|me|you|your)\b|'
+                r'\b(would|could|should|might|maybe|perhaps)\b|'
+                r"\b(going to|let'?s|let me|i'?ll)\b|"
+                r'\b(consider|suppose|assume|think|imagine|pretend|simplify|'
+                r'alternative|instead|rather|perhaps)\b',
+                sl, re.IGNORECASE
+            ):
+                return False  # no reasoning marker → likely bash output
             return True
         if last == ":" and sl.count(" ") >= 4:
             return True
@@ -999,23 +1098,43 @@ class ShellSession(asyncssh.SSHServerSession):
                         icon, t["mitre"], t["label"],
                         self.username, self.peer, cmd)
 
-        for url in urls:
-            asyncio.ensure_future(quarantine_url(url, self.sid, self.peer))
-
         jlog({"event": "cmd", "sid": self.sid, "peer": self.peer,
               "user": self.username, "persona": self.persona.id,
               "ts": ts, "cmd": cmd, "ttps": ttps, "urls": urls})
-
         self.ttps.extend(ttps)
         self.cmds.append({"ts": ts, "cmd": cmd, "ttps": ttps})
+
+        # wget / curl — real download streamed to channel + quarantined
+        c_stripped = cmd.strip()
+        wget_match = re.match(r'(wget|curl)\b', c_stripped, re.I)
+        if wget_match:
+            out_match = re.search(r'-[oO]\s+(\S+)', c_stripped)
+            outfile = out_match.group(1) if out_match else None
+            url = urls[0] if urls else "http://unknown/payload"
+            output = await stream_wget_download(url, outfile, self._chan,
+                                                 self.sid, self.peer)
+            self.cmds[-1]["response"] = output
+            self._ps.advance(cmd)
+            if not is_exec:
+                self._chan.write(self._ps.current())
+            if c_stripped in ("exit", "logout", "quit") or is_exec:
+                self._chan.close()
+            return
+
+        for url in urls:
+            asyncio.ensure_future(quarantine_url(url, self.sid, self.peer))
 
         self._ps.advance(cmd)
 
         self._strip_echo = cmd.strip()
         self._llm_buf = ""
+        self._json_failed = False
+        self._first_chunk_seen = False
 
         def _write_chunk(text):
             log.info("TRACE _write_chunk: enters  text=%r strip_echo=%r", text, getattr(self, "_strip_echo", ""))
+            if self._json_failed:
+                return
             # Phase 1: strip command echo (defense in depth)
             rem = getattr(self, "_strip_echo", "")
             if rem:
@@ -1036,6 +1155,15 @@ class ShellSession(asyncssh.SSHServerSession):
                     log.info("TRACE _write_chunk: all matched echo — return")
                     return
                 log.info("TRACE _write_chunk: echo strip done  remaining=%r strip_echo=%r", text, rem)
+            # Check if model is using JSON (first text after echo strip)
+            if not self._first_chunk_seen and text.strip():
+                self._first_chunk_seen = True
+                if not text.lstrip().startswith("{"):
+                    log.warning("Model rejected: first output not JSON — fallback to static — cmd=%r chunk=%r",
+                                getattr(self, "_strip_echo", ""), text[:80])
+                    self._json_failed = True
+                    self._llm_buf = ""
+                    return
             # Phase 2: JSON Lines parsing + line-level guards
             self._llm_buf += text
             while "\n" in self._llm_buf:
@@ -1066,6 +1194,18 @@ class ShellSession(asyncssh.SSHServerSession):
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
         log.info("TRACE _dispatch: raw output=%r", output)
+        # If model didn't use JSON, replace entire response with static fallback
+        if self._json_failed:
+            log.warning("JSON guard: model did not output JSON — static fallback — cmd=%r", cmd)
+            output = _static_fallback(cmd)
+            self._chan.write(output)
+            self._chan.write(self._ps.current())
+            self.cmds[-1]["response"] = output
+            self._llm_buf = ""
+            self._strip_echo = ""
+            if cmd.strip() in ("exit", "logout", "quit") or is_exec:
+                self._chan.close()
+            return
         # Flush remaining buffered text (incomplete trailing line)
         if self._llm_buf:
             rest = self._llm_buf.strip()
