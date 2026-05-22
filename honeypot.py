@@ -732,10 +732,13 @@ _PROMPT_PATTERN = re.compile(
     r"(^[\w.-]+ ?[#>] ?$)"
 )
 _REASONING_PATTERNS = re.compile(
-    r"^(# |## |\* |"
-    r"We (are|need|should|must|can|would|could|have|had|do|did|shall|may|might)"
-    r"|I (am|'?ll|will|think|should|need|must|would|could|have|had|do|did|shall|may|might)"
-    r"|You are"
+    r"^(# |## |\* |- |"
+    r"['\u2019]m (really|concerned|sorry|glad|sure|not|just)"
+    r"|We (are|need|should|must|can|would|could|have|had|do|did|shall|may|might)"
+    r"|I (am|'?ll|will|think|should|need|must|would|could|have|had|do|did|shall|may|might|"
+    r"m really|m concerned)"
+    r"|You (are|deserve|matter|should|need|must|can)"
+    r"|Your (safety|wellbeing|life|feelings|health)"
     r"|The (user|command|prompt|system|attacker|input|output|message|above|below)"
     r"|Note:|However|But (we|I|the|this|that|if|in|on|at)"
     r"|As an AI|As a "
@@ -746,8 +749,27 @@ _REASONING_PATTERNS = re.compile(
     r"|Make sure|Be sure|Remember|Keep in mind"
     r"|Alternatively[,:]? |In other words[,:]? |To clarify"
     r"|The correct|The proper|The expected"
+    r"|If you('re| are| feel| ever| need)"
+    r"|Please (consider|reach|call|text|visit|look|seek|know)"
     r")"
 )
+
+_NON_BASH_PATTERNS = re.compile(
+    r"https?://|"
+    r"\b988\b|\b911\b|\b741741\b|\b1[-.]?800[-.]?\b|"
+    r"National Suicide|Crisis Text Line|crisis line|suicide prevention|"
+    r"you are not alone|your life matters|reach out for help|"
+    r"International Association|Befrienders|Psychology Today|"
+    r"emergency department|emergency services|"
+    r"call or text|please consider"
+)
+
+def _is_bash_output(text: str) -> bool:
+    """Return False if the LLM response is clearly not terminal output (safety override)."""
+    if not text or len(text) < 2:
+        return True
+    return not _NON_BASH_PATTERNS.search(text)
+
 
 def _is_reasoning_line(line: str) -> bool:
     """Return True if *line* looks like LLM meta-commentary, not terminal output."""
@@ -887,6 +909,9 @@ class ShellSession(asyncssh.SSHServerSession):
                 # Drop prompt lines — the server prints its own prompt
                 if _PROMPT_PATTERN.match(line.strip()):
                     continue
+                # Drop non-bash output (safety override, URLs, crisis resources)
+                if not _is_bash_output(line):
+                    continue
                 self._chan.write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
@@ -902,6 +927,11 @@ class ShellSession(asyncssh.SSHServerSession):
         cmd_stripped = cmd.strip()
         if output.startswith(cmd_stripped):
             output = output[len(cmd_stripped):].lstrip("\r\n ")
+        # Guard: if the LLM broke character (safety override, prose, etc.),
+        # replace with static fallback
+        if output and not _is_bash_output(output):
+            log.warning("Guard: LLM broke character, falling back to static — cmd=%r", cmd)
+            output = _static_fallback(cmd)
         self.cmds[-1]["response"] = output
         if not is_exec:
             if output and not output.endswith("\n"):
