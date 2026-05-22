@@ -727,11 +727,26 @@ def _load_health_cache() -> bool:
 
 
 # ── Output guard (strip LLM reasoning from terminal output) ────────────────
+_PROMPT_PATTERN = re.compile(
+    r"(^[\w.-]+@[\w.-]+[:/#].*[#$>] ?$)|"
+    r"(^[\w.-]+ ?[#>] ?$)"
+)
 _REASONING_PATTERNS = re.compile(
-    r"^(# |## |\* |We are|I am|You are|The user|Note:|However|But |"
-    r"As an AI|The command|As a |Let me|I 'll|I will|I think|"
-    r"I should|This is |The prompt|The system|"
-    r"We should|My role|I need to)"
+    r"^(# |## |\* |"
+    r"We (are|need|should|must|can|would|could|have|had|do|did|shall|may|might)"
+    r"|I (am|'?ll|will|think|should|need|must|would|could|have|had|do|did|shall|may|might)"
+    r"|You are"
+    r"|The (user|command|prompt|system|attacker|input|output|message|above|below)"
+    r"|Note:|However|But (we|I|the|this|that|if|in|on|at)"
+    r"|As an AI|As a "
+    r"|Let me"
+    r"|This is |These are |That is "
+    r"|My role"
+    r"|Thus[,:]? |Hence[,:]? |Therefore[,:]? |So[,:]? "
+    r"|Make sure|Be sure|Remember|Keep in mind"
+    r"|Alternatively[,:]? |In other words[,:]? |To clarify"
+    r"|The correct|The proper|The expected"
+    r")"
 )
 
 def _is_reasoning_line(line: str) -> bool:
@@ -867,14 +882,20 @@ class ShellSession(asyncssh.SSHServerSession):
             self._llm_buf += text
             while "\n" in self._llm_buf:
                 line, self._llm_buf = self._llm_buf.split("\n", 1)
-                if not _is_reasoning_line(line):
-                    self._chan.write(line + "\r\n")
+                if _is_reasoning_line(line):
+                    continue
+                # Drop prompt lines — the server prints its own prompt
+                if _PROMPT_PATTERN.match(line.strip()):
+                    continue
+                self._chan.write(line + "\r\n")
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
         # Flush remaining buffered text
-        if self._llm_buf and not _is_reasoning_line(self._llm_buf):
-            self._chan.write(self._llm_buf.replace("\n", "\r\n"))
+        if self._llm_buf:
+            rest = self._llm_buf.strip()
+            if rest and not _is_reasoning_line(rest) and not _PROMPT_PATTERN.match(rest):
+                self._chan.write(self._llm_buf.replace("\n", "\r\n"))
         self._llm_buf = ""
         self._strip_echo = ""
         # Post-hoc: strip command echo from the full response
