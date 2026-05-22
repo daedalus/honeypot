@@ -862,6 +862,8 @@ class ShellSession(asyncssh.SSHServerSession):
         self._llm_buf = ""
         self.cmds[-1]["response"] = output
         if not is_exec:
+            if output and not output.endswith("\n"):
+                self._chan.write("\r\n")
             self._chan.write(self._ps.current())
 
         log.info("EXEC-DEBUG: closing chan, output_len=%d", len(output))
