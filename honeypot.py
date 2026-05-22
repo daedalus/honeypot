@@ -846,9 +846,24 @@ class ShellSession(asyncssh.SSHServerSession):
 
         self._ps.advance(cmd)
 
+        self._strip_echo = cmd.strip()
         self._llm_buf = ""
 
         def _write_chunk(text):
+            # Phase 1: strip command echo
+            rem = getattr(self, "_strip_echo", "")
+            if rem:
+                for i, ch in enumerate(text):
+                    if rem and ch == rem[0]:
+                        rem = rem[1:]
+                    else:
+                        rem = ""
+                        text = text[i:]
+                        break
+                self._strip_echo = rem
+                if not text:
+                    return
+            # Phase 2: line-level reasoning guard
             self._llm_buf += text
             while "\n" in self._llm_buf:
                 line, self._llm_buf = self._llm_buf.split("\n", 1)
@@ -857,9 +872,15 @@ class ShellSession(asyncssh.SSHServerSession):
 
         output = await llm_shell(self.history, cmd, self.persona.system_prompt,
                                  on_chunk=_write_chunk)
+        # Flush remaining buffered text
         if self._llm_buf and not _is_reasoning_line(self._llm_buf):
             self._chan.write(self._llm_buf.replace("\n", "\r\n"))
         self._llm_buf = ""
+        self._strip_echo = ""
+        # Post-hoc: strip command echo from the full response
+        cmd_stripped = cmd.strip()
+        if output.startswith(cmd_stripped):
+            output = output[len(cmd_stripped):].lstrip("\r\n ")
         self.cmds[-1]["response"] = output
         if not is_exec:
             if output and not output.endswith("\n"):
