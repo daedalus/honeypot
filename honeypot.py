@@ -756,7 +756,7 @@ _REASONING_PATTERNS = re.compile(
     r"|The correct|The proper|The expected"
     r"|If you('re| are| feel| ever| need)"
     r"|Please (consider|reach|call|text|visit|look|seek|know|contact)"
-    r"|First[,:]? (I|let|we)"
+    r"|First[,:]? (I|let|we|the|this|that|the user|of all|of many)"
     r"|Okay[,:]? let |Ok[,:]? let"
     r"|Alright[,:]? |Actually[,:]? |After reviewing|Going to "
     r"|Thinking about|Hold on[,:]? |Re-?evaluating|For reference"

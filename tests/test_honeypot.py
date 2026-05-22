@@ -1178,6 +1178,293 @@ class TestAdversarialGuard:
         )
 
 
+# ── JSON Lines output ─────────────────────────────────────────────────────────
+
+class TestParseJsonLine:
+    """Unit tests for _parse_json_line — the JSON Lines output parser."""
+
+    def test_text_line(self):
+        assert hp._parse_json_line('{"t":"hello world"}') == "hello world"
+
+    def test_text_empty(self):
+        assert hp._parse_json_line('{"t":""}') == ""
+
+    def test_text_with_special_chars(self):
+        assert hp._parse_json_line(r'{"t":"cat: /etc/shadow: Permission denied"}') == "cat: /etc/shadow: Permission denied"
+
+    def test_binary_line(self):
+        import base64
+        b64 = base64.b64encode(b"hello\x00world").decode()
+        assert hp._parse_json_line('{"b":"' + b64 + '"}') == b"hello\x00world"
+
+    def test_binary_empty(self):
+        assert hp._parse_json_line('{"b":""}') == b""
+
+    def test_non_json_discarded(self):
+        assert hp._parse_json_line("this is reasoning text") is None
+
+    def test_empty_line_discarded(self):
+        assert hp._parse_json_line("") is None
+        assert hp._parse_json_line("   ") is None
+
+    def test_invalid_json_discarded(self):
+        assert hp._parse_json_line("{invalid}") is None
+
+    def test_wrong_type_t(self):
+        assert hp._parse_json_line('{"t":123}') is None
+
+    def test_wrong_type_b(self):
+        assert hp._parse_json_line('{"b":123}') is None
+
+    def test_extra_keys_discarded(self):
+        assert hp._parse_json_line('{"t":"ok","extra":1}') is None
+
+    def test_unknown_key_discarded(self):
+        assert hp._parse_json_line('{"x":"y"}') is None
+
+    def test_no_keys_discarded(self):
+        assert hp._parse_json_line('{}') is None
+
+    def test_bad_base64_returns_none(self):
+        assert hp._parse_json_line('{"b":"not-valid-base64-!!!-"}') is None
+
+    def test_caught_adv_inputs_still_rejected(self):
+        """_parse_json_line must reject all adversarial reasoning inputs."""
+        import base64
+        b64 = base64.b64encode(b"bad").decode()
+        for line in TestAdversarialGuard.adversarial_inputs:
+            assert hp._parse_json_line(line) is None, f"Should reject: {line!r}"
+        # validate binary still works
+        assert hp._parse_json_line('{"b":"' + b64 + '"}') == b"bad"
+
+
+class TestJsonOutputPipeline:
+    """Integration tests for the JSON output pipeline in _write_chunk.
+
+    Simulates the echo-strip + JSON Lines parsing that _write_chunk does.
+    """
+
+    @staticmethod
+    def _process(cmd: str, chunks: list[str]) -> list[str | bytes]:
+        """Run chunks through echo-strip + JSON parse, return what would write."""
+        written: list[str | bytes] = []
+        buf = ""
+        rem = cmd
+
+        for text in chunks:
+            # Echo strip
+            if rem:
+                all_matched = True
+                for i, ch in enumerate(text):
+                    if rem and ch == rem[0]:
+                        rem = rem[1:]
+                    else:
+                        all_matched = False
+                        rem = ""
+                        text = text[i:]
+                        break
+                if not text:
+                    continue
+                if all_matched:
+                    continue
+            # JSON Lines parsing
+            buf += text
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                parsed = hp._parse_json_line(line)
+                if parsed is not None:
+                    if isinstance(parsed, str):
+                        if parsed.strip() == cmd:
+                            continue
+                        if hp._PROMPT_PATTERN.match(parsed.strip()):
+                            continue
+                        written.append(parsed)
+                    else:
+                        written.append(parsed)
+                    continue
+                # Fallback guards
+                if hp._is_reasoning_line(line):
+                    continue
+                if hp._PROMPT_PATTERN.match(line.strip()):
+                    continue
+                if not hp._is_bash_output(line):
+                    continue
+                written.append(line)
+
+        # Flush trailing line
+        if buf:
+            parsed = hp._parse_json_line(buf)
+            if isinstance(parsed, str) and parsed.strip():
+                if not hp._PROMPT_PATTERN.match(parsed.strip()):
+                    written.append(parsed)
+            elif parsed is None:
+                if not hp._is_reasoning_line(buf) and not hp._PROMPT_PATTERN.match(buf):
+                    written.append(buf)
+
+        return written
+
+    # ── JSON Lines text ──────────────────────────────────────────────────────
+
+    def test_single_line(self):
+        result = self._process("ls", ['{"t":".bash_history"}\n'])
+        assert result == [".bash_history"]
+
+    def test_multiple_lines_same_chunk(self):
+        result = self._process("ls", ['{"t":"file1"}\n{"t":"file2"}\n'])
+        assert result == ["file1", "file2"]
+
+    def test_multiple_lines_split_chunks(self):
+        result = self._process("ls", ['{"t":"file1"}\n', '{"t":"file2"}\n'])
+        assert result == ["file1", "file2"]
+
+    def test_trailing_incomplete_line_flushed(self):
+        result = self._process("ls", ['{"t":"file1"}\n{"t":"file2"}'])
+        assert result == ["file1", "file2"]
+
+    def test_no_trailing_newline_first_chunk(self):
+        result = self._process("ls", ['{"t":"line1"}', '\n{"t":"line2"}\n'])
+        assert result == ["line1", "line2"]
+
+    # ── Binary output ────────────────────────────────────────────────────────
+
+    def test_binary_line(self):
+        import base64
+        b64 = base64.b64encode(b"hello\x00world").decode()
+        result = self._process("cat", ['{"b":"' + b64 + '"}\n'])
+        assert result == [b"hello\x00world"]
+
+    def test_mixed_text_and_binary(self):
+        import base64
+        b64 = base64.b64encode(b"\xff\xfe\x00\x01").decode()
+        result = self._process("cat", [
+            '{"t":"Binary file follows:"}\n',
+            '{"b":"' + b64 + '"}\n',
+            '{"t":"Done"}\n',
+        ])
+        assert result == ["Binary file follows:", b"\xff\xfe\x00\x01", "Done"]
+
+    # ── Reasoning / meta discarded ───────────────────────────────────────────
+
+    def test_reasoning_before_json(self):
+        result = self._process("ls", [
+            "Let me think about this...\n",
+            '{"t":".bash_history"}\n',
+        ])
+        assert result == [".bash_history"]
+
+    def test_reasoning_after_json(self):
+        result = self._process("ls", [
+            '{"t":".bash_history"}\n',
+            "I should output realistic content...\n",
+        ])
+        assert result == [".bash_history"]
+
+    def test_reasoning_mixed(self):
+        result = self._process("ls", [
+            "First, the user typed ls\n",
+            '{"t":".bash_history"}\n',
+            "Given the context, this is a Linux server\n",
+            '{"t":".aws"}\n',
+            "Alright, here is my response\n",
+        ])
+        assert result == [".bash_history", ".aws"]
+
+    def test_all_reasoning_no_json(self):
+        result = self._process("ls", [
+            "Let me think about this.\n",
+            "Given the user's command, I should output:\n",
+        ])
+        assert result == []
+
+    # ── Prompt filter in JSON ────────────────────────────────────────────────
+
+    def test_prompt_in_json_is_skipped(self):
+        result = self._process("ls", [
+            '{"t":"root@prod-db-03:~# "}\n',
+            '{"t":".bash_history"}\n',
+        ])
+        assert result == [".bash_history"]
+
+    # ── Command echo in JSON ─────────────────────────────────────────────────
+
+    def test_cmd_echo_in_json_is_skipped(self):
+        result = self._process("ls", [
+            '{"t":"ls"}\n',
+            '{"t":".bash_history"}\n',
+        ])
+        assert result == [".bash_history"]
+
+    # ── Echo-strip before JSON ───────────────────────────────────────────────
+
+    def test_echo_strip_then_json(self):
+        """Echo strip runs on raw text BEFORE JSON parsing."""
+        result = self._process("ls", [
+            'ls{"t":".bash_history"}\n',  # 'ls' is the echo
+        ])
+        assert result == [".bash_history"]
+
+    # ── Fallback: non-JSON through old guards ─────────────────────────────────
+
+    def test_fallback_raw_text(self):
+        """If model doesn't use JSON, old guards catch reasoning."""
+        result = self._process("ls", [
+            "Let me think...\n",
+            "bash: ls: command not found\n",
+        ])
+        assert result == ["bash: ls: command not found"]
+
+    def test_fallback_raw_text_all_discarded(self):
+        """Non-JSON, non-bash output is discarded by old guards."""
+        result = self._process("ls", [
+            "I'm sorry but I can't help with that.\n",
+            "This system is monitored.\n",
+        ])
+        assert result == []
+
+    def test_fallback_prompt_line_discarded(self):
+        result = self._process("ls", [
+            "root@prod-db-03:~# \n",
+            "bash: ls: command not found\n",
+        ])
+        assert result == ["bash: ls: command not found"]
+
+    # ── Edge cases ───────────────────────────────────────────────────────────
+
+    def test_empty_chunks(self):
+        assert self._process("", []) == []
+
+    def test_empty_cmd(self):
+        result = self._process("", ['{"t":"output"}\n'])
+        assert result == ["output"]
+
+    def test_unicode_in_json(self):
+        result = self._process("", ['{"t":"héllo wörld"}\n'])
+        assert result == ["héllo wörld"]
+
+    def test_consecutive_newlines(self):
+        result = self._process("", ['{"t":"a"}\n\n{"t":"b"}\n'])
+        # Empty lines are valid terminal output and pass through
+        assert result == ["a", "", "b"]
+
+    def test_carriage_returns(self):
+        result = self._process("", ['{"t":"line"}\r\n'])
+        assert result == ["line"]
+
+    def test_long_output_spanning_chunks(self):
+        chunks = [
+            '{"t":"' + "x" * 500 + '"}\n',
+        ]
+        result = self._process("", chunks)
+        assert result == ["x" * 500]
+
+    def test_binary_large_payload(self):
+        import base64
+        raw = bytes(range(256))
+        b64 = base64.b64encode(raw).decode()
+        result = self._process("cat", ['{"b":"' + b64 + '"}\n'])
+        assert result == [raw]
+
+
 # ── Echo-strip regression tests ─────────────────────────────────────────────
 
 class TestEchoStrip:
