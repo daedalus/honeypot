@@ -872,6 +872,7 @@ class ShellSession(asyncssh.SSHServerSession):
         self._chan   = chan
         self._is_exec = False
         self._exec_cmd = ""
+        chan.set_echo(False)
 
     def shell_requested(self) -> bool:
         return True
