@@ -864,6 +864,17 @@ def _is_reasoning_line(line: str) -> bool:
         return True
     if sl.count("```") >= 2:
         return True
+    # Prose heuristic: starts with capital letter only (not all-caps like PING),
+    # has 6+ words, ends with sentence punctuation — almost certainly reasoning.
+    words = sl.split()
+    if len(words) >= 6 and sl[0].isupper():
+        if len(sl) > 2 and sl[1].isupper():
+            return False  # all-caps start like PING, SSH, TCP
+        last = sl[-1]
+        if last in ".!?":
+            return True
+        if last == ":" and sl.count(" ") >= 4:
+            return True
     return False
 
 
