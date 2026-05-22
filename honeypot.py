@@ -786,6 +786,26 @@ _REASONING_PATTERNS = re.compile(
     r"not able to|not programmed|not possible|not appropriate)"
     r"|(helpful, harmless|exist to help|designed to be|programmed to be)"
     r"|Cannot do |Absolutely not|Unacceptable"
+    r"|Since (the|we|I|this|that|it|you|there|our|your|/root|the user)"
+    r"|What (would|should|could|is|are|does|do|if|about|if |kind|type|good)"
+    r"|But (note|wait|first|keep|most|perhaps|unfortunately)"
+    r"|In (the|this|a |many|most|some|my|our|your|order|/root|contrast|"
+    r"general|fact|practice|reality|short|other|any|absence|response|"
+    r"terms|addition|conclusion|summary|my experience)"
+    r"|For (now|the|this|these|example|instance|reference|context|clarity|"
+    r"security|safety|privacy|compliance|consistency|simplicity|brevity|"
+    r"most|some|a |an |any|each|every|this purpose)"
+    r"|Given (the|that|this|what|we|I|our|how|its|it's)"
+    r"|Without (the|a |any|this|that|these|those|its|their|much|further|"
+    r"proper|proper|going|getting|having|being|doing)"
+    r"|Also (maybe|note|consider|keep|remember|think|there|it|we|I|this|that)"
+    r"|A (common|simple|basic|quick|realistic|good|better|typical|fair|"
+    r"proper|correct|safe|safer|more|lot|bit|few|key|great|"
+    r"reasonable|useful|helpful|standard)"
+    r"|Whether (the|this|that|it|we|I|you|they|or)"
+    r"|To (answer|respond|handle|deal|address|resolve|be|do|make|get|provide|"
+    r"keep|avoid|ensure|determine|decide|check|verify|confirm|"
+    r"start|begin|continue|simulate|emulate|mimic)"
     r")",
     re.IGNORECASE
 )
@@ -869,15 +889,17 @@ class ShellSession(asyncssh.SSHServerSession):
         self._sdir    = sessions_dir
 
     def connection_made(self, chan):
-        self._chan   = chan
+        self._chan    = chan
         self._is_exec = False
         self._exec_cmd = ""
+        self._has_pty = False
 
     def shell_requested(self) -> bool:
         return True
 
     def pty_requested(self, term_type, term_size, term_modes):
         term_modes[53] = 0  # ECHO = opcode 53 — disable client-side echo
+        self._has_pty = True
         return True
 
     def exec_requested(self, command: str) -> bool:
@@ -901,7 +923,8 @@ class ShellSession(asyncssh.SSHServerSession):
                 cmd = self._buf.strip()
                 log.info("TRACE data_received: enter  cmd=%r buf_before=%r", cmd, self._buf)
                 self._buf = ""
-                self._chan.write("\r\n")
+                if not self._has_pty:
+                    self._chan.write("\r\n")
                 if cmd:
                     asyncio.ensure_future(self._dispatch(cmd))
                 else:
