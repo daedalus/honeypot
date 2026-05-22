@@ -872,9 +872,12 @@ class ShellSession(asyncssh.SSHServerSession):
         self._chan   = chan
         self._is_exec = False
         self._exec_cmd = ""
-        chan.set_echo(False)
 
     def shell_requested(self) -> bool:
+        return True
+
+    def pty_requested(self, term_type, term_size, term_modes):
+        term_modes[53] = 0  # ECHO = opcode 53 — disable client-side echo
         return True
 
     def exec_requested(self, command: str) -> bool:
