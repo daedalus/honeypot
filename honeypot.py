@@ -324,8 +324,10 @@ def render_banner(persona: Persona, username: str, last_login: str) -> str:
 
 # ── TTP pattern library ───────────────────────────────────────────────────────
 TTP_PATTERNS = [
-    (r'\b(wget|curl)\s+https?://',          "T1105", "Ingress Tool Transfer",       "HIGH"),
-    (r'chmod\s+\+x',                         "T1222", "File Permission Modification", "MED"),
+    (r'\b(wget|curl)\b.*https?://',          "T1105", "Ingress Tool Transfer",       "HIGH"),
+    (r'\|\s*(bash|sh)\b',                    "T1059", "Command & Scripting: Pipe",     "HIGH"),
+    (r'base64\s*-d\b.*\|.*(?:bash|sh)',      "T1027", "Obfuscated Files or Info",      "HIGH"),
+    (r'chmod\s+(\+x|4[0-7]{3}|6[0-7]{3}|7[0-7]{3}|a[\w+-])', "T1222", "File Permission Modification", "MED"),
     (r'(crontab|/etc/cron)',                 "T1053", "Scheduled Task/Job",           "HIGH"),
     (r'(useradd|adduser|usermod)',            "T1136", "Create Account",               "HIGH"),
     (r'(authorized_keys|ssh-keygen)',         "T1098", "Account Manipulation",         "HIGH"),
@@ -338,12 +340,18 @@ TTP_PATTERNS = [
     (r'(iptables|ufw)\s+(--flush|-F)',       "T1562", "Impair Defenses",               "HIGH"),
     (r'(history\s*-c|>\s*/root/\.bash_history)', "T1070", "Indicator Removal",        "MED"),
     (r'(\bpsql\b|\bmysql\b|\bmongo\b)',      "T1005", "Data from Local System",        "MED"),
-    (r'(python|perl|ruby|php)\s+-[ce]',     "T1059", "Command & Scripting: Interp",   "HIGH"),
+    (r'(python\d*|perl|ruby|php)\s+-[ce]',  "T1059", "Command & Scripting: Interp",   "HIGH"),
+    (r'socket\.socket\(\)',                  "T1071", "C2: Reverse Shell",             "CRIT"),
+    (r'/dev/tcp/',                           "T1071", "C2: Reverse Shell",             "CRIT"),
+    (r'curl\b.*\s+-F\s+.*@\S+/',            "T1041", "C2: Data Exfiltration",         "CRIT"),
     (r'systemctl\s+(enable|start)',          "T1543", "Create/Modify System Process",  "MED"),
     (r'/tmp/[^\s]+\s*&',                     "T1036", "Masquerading",                  "HIGH"),
+    (r'docker\s+run\s+.*-v\s+/:/host',       "T1610", "Deploy Container (Escape)",      "CRIT"),
+    (r'tcpdump\b',                            "T1040", "Network Sniffing",               "MED"),
     (r'(ssh|scp)\s+.*@',                     "T1021", "Remote Services: SSH",          "MED"),
     (r'dd\s+if=',                            "T1005", "Data Staged for Exfil",         "MED"),
     (r'>\s*/dev/null\s+2>&1',               "T1027", "Obfuscated Files/Info",          "LOW"),
+    (r'find\b.*-perm\s*-4\d{3}.*-type\s+f', "T1548", "Abuse Elevation Control",         "MED"),
     # Network device specific
     (r'show\s+(run|config)',                 "T1005", "Config Disclosure",             "HIGH"),
     (r'(crypto\s+key|show\s+crypto)',        "T1552", "Crypto Key Exposure",           "CRIT"),
@@ -362,7 +370,7 @@ def classify_ttps(cmd: str) -> list[dict]:
 
 
 def extract_urls(cmd: str) -> list[str]:
-    return re.findall(r'https?://[^\s\'";&|]+', cmd)
+    return re.findall(r'(?:https?|ftp)://[^\s\'";&|]+', cmd)
 
 
 # ── Session log ───────────────────────────────────────────────────────────────
@@ -493,13 +501,14 @@ async def stream_wget_download(
 
 
 def _guess_file_type(path: Path) -> str:
-    try:
-        import subprocess
-        r = subprocess.run(["file", "-b", str(path)], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
+    if path.exists():
+        try:
+            import subprocess
+            r = subprocess.run(["file", "-b", str(path)], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
     ext = path.suffix.lower()
     return {
         ".py": "Python script, ASCII text executable",
@@ -748,7 +757,7 @@ def _static_fallback(cmd: str) -> str:
     if c.startswith("uname"):          return ("Linux prod-db-03 5.15.0-107-generic "
                                                "#117-Ubuntu SMP x86_64 GNU/Linux")
     if c.startswith("cat"):            return "cat: permission denied"
-    if c in ("exit", "logout"):        return ""
+    if c in ("exit", "logout", "quit"):        return ""
     return f"bash: {c.split()[0]}: command not found"
 
 
@@ -887,8 +896,9 @@ _REASONING_PATTERNS = re.compile(
     r"cannot|can't|won't|apologize|detect|can see|don't think|refuse)"
     r"|You( |['\u2019])(are|deserve|matter|should|need|must|can|re asking|'re asking)"
     r"|Your (safety|wellbeing|life|feelings|health|session|activity)"
-    r"|The (user|command|prompt|system|attacker|input|output|message|above|below|"
-    r"following|best|most|first|next|previous)"
+    r"|The (following|best|most|first|next|previous|same|"
+    r"only|real|actual|right|wrong|last|second|whole|entire|"  
+    r"goal|aim|objective|issue|problem|challenge|concern|risk)"
     r"|Note:|However|But (we|I|the|this|that|if|in|on|at)"
     r"|As an AI|As a |My purpose|My (role|training|guidelines|rules)"
     r"|Let me|Let's "
@@ -972,12 +982,22 @@ _NON_BASH_PATTERNS = re.compile(
     r"support is available|speak with a |talk to someone|"
     r"reach out to a|contact a (mental|healthcare|crisis)|"
     r"system is monitored|session is being (recorded|monitored|logged)|"
-    r"unauthorized access|not permitted|denied for safety|"
+    r"unauthorized access|denied for safety|"
     r"violates (my|our|safety|security|its|the|these)|"
     r"goes against (my|our|my core|my safety|our safety)|"
     r"(prevent|require) me from|refuse (harmful|dangerous|this|that)|"
     r"(my|our) (guidelines|policies|safety|training|rules|purpose|core)|"
     r"flagged for (review|monitoring)|interaction has been|"
+    r"I'd be happy to|I appreciate your request|I must (decline|prioritize)|"
+    r"I have been trained|I will not participate|"
+    r"I cannot simulate|I cannot and will not|"
+    r"I'm programmed to|I'm unable to|"
+    r"I am sorry, I cannot|I cannot and will not|"
+    r"This (conversation) violates|"
+    r"It looks like you're trying to|"
+    r"I detect a (potential|security)|"
+    r"My ethical guidelines|That goes against my|"
+    r"I was designed to be (helpful|harmless)|"
     r"jailbreak|trick me|breaking my rules|"
     r"No puedo|Je ne peux|Ich kann|Non posso|Lo siento|Tut mir leid|"
     r"Maaf, saya|saya tidak bisa|saya tidak dapat|"
@@ -1031,8 +1051,14 @@ def _is_reasoning_line(line: str) -> bool:
                 sl, re.IGNORECASE
             ):
                 return False  # no reasoning marker → likely bash output
+            if sl.startswith("Traceback"):
+                return False
+            if re.search(r'\b(Logging|Killing|Terminating) \w+ (out|off)\b', sl, re.I):
+                return False
             return True
         if last == ":" and sl.count(" ") >= 4:
+            if sl.startswith("Traceback"):
+                return False
             return True
     return False
 
